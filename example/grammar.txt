@@ -1,0 +1,5 @@
+<S>       ::= <Aux> <NP> <VP> | <VP>  | <NP> <VP>
+<NP>      ::= <proper-noun> | <det> <nominal> | <prep> <proper-noun> | <prep> <det> <nominal> | <det> <AP> <nominal> | <prep> <det> <AP> <nominal> | <AP> <proper-noun> | <prep> <AP> <proper-noun>
+<VP>      ::= <verb> <NP> |  <verb>  | <verb> <NP> <NP>
+<AP>      ::= <adjective>
+<nominal> ::= <noun> <nominal> | <noun>

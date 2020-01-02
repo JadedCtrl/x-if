@@ -1,0 +1,14 @@
+book :class <verb>
+flight :class <noun>
+that :class <det>
+this :class <det>
+the :class <det>
+with :class <det>
+be :class <aux>
+to :class <prep>
+with :class <prep>
+Bob :class <proper-noun>
+kill :class <verb>
+eat :class <verb>
+apple :class <noun>
+red :class <adjective>
