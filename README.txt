@@ -4,6 +4,10 @@ X-IF
 
 X-IF is a portable & object-oriented interactive fiction engine/transpiler.
 
+It is a WIP, and useless right now! Come back later, OK? ~♥
+
+... now, the rest of this file's just filled with lies.
+
 The engine can be used to make classic Infocom-esque text-adventures that run
 in a terminal (with readline support), or to make IF with simple images and
 sound (with GTK or terminal; the latter via libsixel or manual ASCII art).
