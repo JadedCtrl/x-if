@@ -18,12 +18,17 @@
   (:use :cl :arnesi)
   (:nicknames :xif))
 
+(defpackage :x-if.misc
+  (:use :cl)
+  (:nicknames :xif.m)
+  (:export :line-cdr :line-car :line-length))
+
 (defpackage :x-if.lexicon
   (:use :cl :arnesi :earley-parser)
   (:nicknames :xif.l)
   (:export :action-indirect-required-p :action-direct-required-p
-           :action-p :action-function
-           *lexicon* :add-adjective :add-noun :add-proper-noun))
+           :action-p :action-function :add-action :add-verb
+           *lexicon* :add-adjective :add-noun :add-proper-noun :reload-lexicon))
 
 (defpackage :x-if.environment
   (:use :cl :arnesi :bknr.datastore)
@@ -92,7 +97,7 @@
   "Parse a given string into a list of Earley trees."
   (mapcar #'car
   (mapcar #'parse-statement
-          (mapcar #'clean-statement(split-statements sentence)))))
+          (mapcar #'clean-statement (split-statements sentence)))))
 
 ;; —————————————————————————————————————
 
@@ -102,11 +107,9 @@
   (earley-parser:chart-listing->trees
     (earley-parser:earley-parse statement
       (earley-parser:load-bnf-grammar #p"example/grammar.txt")
-      (earley-parser:load-lexicon #p"example/lexicon.txt"))))
+      (xif.l:reload-lexicon))))
 
-;; —————————————————————————————————————
 
-;; STRING → LIST_OF_STRINGS
 (defun split-statements (sentence)
   "Split up a string into different statements, based on punctuation."
   (cl-strings:split sentence ","))
@@ -203,7 +206,19 @@
 
 ;; —————————————————————————————————————
 
-(defvar *lexicon* "")
+(defvar *lexicon*
+"the :class <det>
+that :class <det>
+this :class <det>
+here :class <prep>
+there :class <prep>
+be :class <aux>
+to :class <prep>
+with :class <prep>
+a :class <det>
+an :class <det>
+")
+
 (defvar *actions* (make-hash-table :test #'equal))
 
 (defmacro add-string-to-var (var string)
@@ -222,14 +237,28 @@
 (defmethod add-adjective ((adj string))
   (add-word adj "adjective"))
 
-(defmethod add-adjective ((adjectives xif.e::god))
+(defmethod add-adjective ((object xif.e::god))
   (mapcar #'add-adjective (xif.e:adjectives object)))
 
 (defmethod add-verb ((verb string))
   (add-word verb "verb"))
 
-(defun add-action (
+(defmethod add-action ((action xif.e::action))
+  (mapcar #'add-verb (xif.e::verbs action)))
 
+(defun load-string-lexicon (lex-string)
+  "Read all words from a dictionary file into a lexicon and a part of speech."
+  (with-input-from-string (lex-str-stream lex-string)
+  (let ((lexicon (make-hash-table :test earley-parser::*string-comparer*))
+        (part-of-speech nil))
+    (loop :while (listen lex-str-stream)
+          :do (let ((w (earley-parser::read-lexicon-line lex-str-stream)))
+                (pushnew (earley-parser::terminal-class w) part-of-speech :test earley-parser::*string-comparer*)
+                (push w (gethash (earley-parser::terminal-word w) lexicon))))
+    (earley-parser::make-lexicon :dictionary lexicon :part-of-speech part-of-speech))))
+
+(defun reload-lexicon ()
+  (load-string-lexicon *lexicon*))
 
 ;; —————————————————————————————————————
 ;; X-IF.INTERPRET
@@ -302,6 +331,8 @@
 
 ;; —————————————————————————————————————
 
+
+
 (define-persistent-class god ()
   ((id :read
       :initarg :id :reader id
@@ -309,12 +340,12 @@
       :index-initargs (:test #'equal)
       :index-reader id→object
       :index-values all-objects)
-   (name :read
-      :initarg :name :reader name
+   (nouns :read
+      :initarg :nouns :reader nouns
       :index-type bknr.datastore::hash-index
-      :index-initargs (:test #'equal)
-      :index-reader name→object)
-   (proper-name :read
+      :index-initargs (:test #'position)
+      :index-reader noun→object)
+   (proper-noun :read
       :initarg :proper-name :reader proper-name
       :index-type bknr.datastore::hash-index
       :index-initargs (:test #'equal)
@@ -363,20 +394,42 @@
   ((extreme-makeover-home-edition :read
                                   :initform T :index-values all-locations)))
 
-(define-persistent-class fareblo ()
+(define-persistent-class action ()
   ((function-name :read
-      :initarg :function :reader function-name
-      :index-type bknr.datastore::hash-index
-      :index-reader function→action)
+      :initarg :function :reader function-name)
+      ; :index-type bknr.datastore::hash-index
+      ; :index-reader function→action
    (verbs :read
        :initarg :verbs :reader verbs)
-   (
+       ; :index-type bknr.datastore::hash-index
+       ; :index-reader verb→action
+   (direct-object-p :read
+       :initarg :direct-object-p :initform nil :reader direct-object-required-p)
+   (indirect-object-p :read
+       :initarg :indirect-object-p :initform nil :reader indirect-object-required-p)))
 
+(defclass queued-action ()
+  ((function-name
+       :initarg :function :accessor function-name)
+   (direct-object
+       :initarg :direct-object :initform nil :accessor direct-object)
+   (indirect-object
+       :initarg :indirect-object :initform nil :accessor indirect-object)
+   (subject
+       :initarg :subject :initform (get-player) :accessor subject)))
 
 (defun get-player ()
   (id→object 100))
 
 
+(defmethod initialize-instance :after ((god god) &key)
+  (xif.l:add-noun god)
+  (xif.l:add-adjective god)
+  (xif.l:reload-lexicon))
+
+(defmethod initialize-instance :after ((action action) &key)
+  (xif.l:add-action action)
+  (xif.l:reload-lexicon))
 
 
 ;; —————————————————————————————————————
@@ -412,6 +465,9 @@
     (populate-world))
   (game-loop))
 
+(defun examine (object)
+  (text (xif.e:description object)))
+
 (defun populate-world ()
   (make-instance 'xif.e::location :name "Lobby" :id 0
                  :description "It's rather ugly, really.")
@@ -420,7 +476,9 @@
                  :location (id→object 0))
   (make-instance 'xif.e::player :name "Maria"   :id 100
                  :description "A rather hideous lass."
-                 :location (id→object 0)))
+                 :location (id→object 0))
+  (make-instance 'xif.e::action :function-name 'xif.c::examine :direct-object-p T
+                 :verbs '("examine" "look" "view")))
 
 
 
@@ -442,3 +500,21 @@
 
 (defun xif.c::input-sentence ()
   (read-line))
+
+(in-package :x-if.misc)
+
+(defun string-lines (string)
+  (cl-strings:split string #\newline))
+
+(defun line-cdr (string)
+  (lines-string (cdr (string-lines string))))
+
+(defun line-car (string)
+  (lines-string (car (string-lines string))))
+
+(defun line-length (string)
+  (length (string-lines string)))
+
+(defun lines-string (lines)
+  (cl-strings:join lines :separator "
+"))
