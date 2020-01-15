@@ -7,39 +7,54 @@
 ;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ;; GNU General Public License for more details.
 
-;; TODO: get x-if.lexicon working, so the lexicon can be modified on-the-fly
-;;       by x-if.environment, when new objects are created.
-;;       also add :synonyms and :adjectives to the GOD object class
+;; TODO: Get :x-if.interpret to make ACTION objects.
 
 ;; —————————————————————————————————————
 ;; PACKAGES
 
 (defpackage :x-if
-  (:use :cl :arnesi)
+  (:use :cl)
   (:nicknames :xif))
 
 (defpackage :x-if.misc
-  (:use :cl)
+  (:use :cl :anaphora)
   (:nicknames :xif.m)
-  (:export :line-cdr :line-car :line-length))
+  (:export :line-cdr :line-car
+           :line-length :line-position
+           :in-string-p
+           :remove-line
+           :position-equal))
 
 (defpackage :x-if.lexicon
-  (:use :cl :arnesi :earley-parser)
+  (:use :cl :earley-parser)
   (:nicknames :xif.l)
   (:export :action-indirect-required-p :action-direct-required-p
-           :action-p :action-function :add-action :add-verb
-           *lexicon* :add-adjective :add-noun :add-proper-noun :reload-lexicon))
+           :action-p :action-function :add-action :add-verb :remove-word
+           *string-lexicon* *lexicon*
+           :add-game-object-words :delete-game-object-words
+           :add-adjective :add-noun :add-proper-noun :add-verb
+           :reload-lexicon))
 
 (defpackage :x-if.environment
-  (:use :cl :arnesi :bknr.datastore)
+  (:use :cl :bknr.datastore)
   (:nicknames :xif.e)
-  (:export :name→object :all-objects :id→object :get-player
-           :adjectives :description :id :name :synonyms :adjectives
-           :location→entity :all-entities
-           :inventory :max-inventory :weight :hp :max-hp))
+  (:export :id→game-object :get-player
+           :all-game-objects
+           :noun→game-objects :proper-noun→game-objects :adjective→game-objects
+           :all-entities
+           :noun→entities :proper-noun→entities :adjective→entities
+           :all-mobs
+           :noun→mobs :proper-noun→mobs :adjective→mobs
+           :noun→locations :proper-noun→locations :adjective→locations
+           :all-locations
+           :id :description
+           :nouns :proper-nouns :adjectives
+           :max-children :weight :hp :max-hp
+           :children :parent
+           :link :unlink))
 
 (defpackage :x-if.parsing
-  (:use :cl :arnesi)
+  (:use :cl)
   (:nicknames :xif.p)
   (:export :parse
            :noun-phrases :det :prep :proper-noun :noun-name :det :prep
@@ -48,18 +63,18 @@
            :the-action :the-subject))
 
 (defpackage :x-if.interpret
-  (:use :cl :arnesi)
+  (:use :cl)
   (:nicknames :xif.i))
 
 (defpackage :x-if.client
-  (:use :cl :arnesi :xif.e :bknr.datastore)
+  (:use :cl :xif.e :bknr.datastore)
   (:nicknames :xif.c)
   (:export :start
            :text :input-sentence :display-options :input-options :play-music
            :show-image :status :prompt))
 
 (defpackage :x-if.client.terminal
-  (:use :cl :arnesi :xif.e)
+  (:use :cl :xif.e)
   (:nicknames :xif.c.t))
 
 
@@ -107,8 +122,7 @@
   (earley-parser:chart-listing->trees
     (earley-parser:earley-parse statement
       (earley-parser:load-bnf-grammar #p"example/grammar.txt")
-      (xif.l:reload-lexicon))))
-
+      xif.l:*lexicon*)))
 
 (defun split-statements (sentence)
   "Split up a string into different statements, based on punctuation."
@@ -206,12 +220,17 @@
 
 ;; —————————————————————————————————————
 
-(defvar *lexicon*
+(defvar *string-lexicon*)
+(setq *string-lexicon*
 "the :class <det>
 that :class <det>
 this :class <det>
 here :class <prep>
 there :class <prep>
+above :class <prep>
+below :class <prep>
+beside :class <prep>
+across :class <prep>
 be :class <aux>
 to :class <prep>
 with :class <prep>
@@ -219,46 +238,83 @@ a :class <det>
 an :class <det>
 ")
 
-(defvar *actions* (make-hash-table :test #'equal))
+(defvar *lexicon* nil)
 
-(defmacro add-string-to-var (var string)
-  `(setq ,var (concatenate 'string ,var ,string)))
 
-(defun add-word (name class)
-  (add-string-to-var *lexicon* (format nil "~A :class \<~A\>~%" name class)))
+;; STRING STRING → NIL
+(defun add-word (word class)
+  "Add a word of the given class to the string-lexicon and parsed lexicon."
+  (setq *string-lexicon*
+        (concatenate 'string *string-lexicon*
+                     (format nil "~A :class \<~A\>~%" word class)))
+  (reload-lexicon))
 
-(defmethod add-noun ((name string))
-  (add-word name "noun"))
 
-(defmethod add-noun ((object xif.e::god))
-  (mapcar #'add-noun (xif.e:synonyms object))
-  (add-noun (xif.e:name object)))
+;; STRING → NIL
+(defun remove-word (word)
+  "Remove a word from the string-lexicon and parsed lexicon."
+  (when (is-word-p word)
+    (setq *string-lexicon*
+          (xif.m:remove-line *string-lexicon* word
+                             :test #'cl-strings:starts-with))
+    (reload-lexicon)))
 
-(defmethod add-adjective ((adj string))
-  (add-word adj "adjective"))
+;; STRING → BOOLEAN
+(defun is-word-p (word)
+  "Return whether or not a given word is in the lexicon."
+  (xif.m:line-position *string-lexicon* word :test #'cl-strings:starts-with))
 
-(defmethod add-adjective ((object xif.e::god))
-  (mapcar #'add-adjective (xif.e:adjectives object)))
 
-(defmethod add-verb ((verb string))
-  (add-word verb "verb"))
+;; SYMBOL SYMBOL STRING → (DEFUN … )
+(defmacro defun-add-wordclass (function-name class-symbol class-string)
+  "Define the add-WORD function of the given word-class. #'add-noun, etc."
+  `(defun ,function-name (,class-symbol)
+     ,(format nil "Add a word of class ~A to the lexicon." class-string)
+     (add-word ,class-symbol ,class-string)))
 
-(defmethod add-action ((action xif.e::action))
-  (mapcar #'add-verb (xif.e::verbs action)))
+(defun-add-wordclass add-proper-noun proper-noun "proper-noun")
+(defun-add-wordclass add-noun noun "noun")
+(defun-add-wordclass add-adjective adjective "adjective")
+(defun-add-wordclass add-verb verb "verb")
 
+
+;; GAME-OBJECT → NIL
+(defmethod add-game-object-words ((object xif.e::game-object))
+  "Add a game-object's words (nouns, adjectives, proper-nouns) to the lexicon."
+  (mapcar #'add-adjective (xif.e:adjectives object))
+  (mapcar #'add-proper-noun (xif.e:proper-nouns object))
+  (mapcar #'add-noun (xif.e:nouns object)))
+
+;; GAME-OBJECT → NIL
+(defmethod remove-game-object-words ((object xif.e::game-object))
+  "Remove a game-object's words (nouns, adjectives, proper-nouns) to the lexicon."
+  (mapcar #'xif.l:remove-word (xif.e:nouns object))
+  (mapcar #'xif.l:remove-word (xif.e:proper-nouns object))
+  (mapcar #'xif.l:remove-word (xif.e:adjectives object)))
+
+;; STRING → LEXICON
 (defun load-string-lexicon (lex-string)
-  "Read all words from a dictionary file into a lexicon and a part of speech."
+  "Read all words from a dictionary file into a lexicon and a part of speech.
+  Abridged version of #'earley-parser:load-lexicon (which reads from a file)."
   (with-input-from-string (lex-str-stream lex-string)
   (let ((lexicon (make-hash-table :test earley-parser::*string-comparer*))
         (part-of-speech nil))
     (loop :while (listen lex-str-stream)
           :do (let ((w (earley-parser::read-lexicon-line lex-str-stream)))
-                (pushnew (earley-parser::terminal-class w) part-of-speech :test earley-parser::*string-comparer*)
+                (pushnew (earley-parser::terminal-class w)
+                         part-of-speech
+                         :test earley-parser::*string-comparer*)
                 (push w (gethash (earley-parser::terminal-word w) lexicon))))
-    (earley-parser::make-lexicon :dictionary lexicon :part-of-speech part-of-speech))))
+    (earley-parser::make-lexicon :dictionary lexicon
+                                 :part-of-speech part-of-speech))))
 
+;; NIL → NIL
 (defun reload-lexicon ()
-  (load-string-lexicon *lexicon*))
+  "Updates the lexicon by parsing the string-lexicon."
+  (setq *lexicon* (load-string-lexicon *string-lexicon*)))
+
+
+
 
 ;; —————————————————————————————————————
 ;; X-IF.INTERPRET
@@ -290,18 +346,23 @@ an :class <det>
 ;; It will also return an appropriate error symbol, as a second value—
 ;; I.E., 'INVALID-ACTION, etc.
 
-;; If a word *isn't* in lexicon, then #'x.if.parsing:parse will return an
-;; error-string instead of a parsed Earley tree— which means that #'interpret
-;; will recieve that error string from the engine. In this case, #'interpret
-;; will return the string as if it were its own error-string, but with an
-;; error-symbol of 'PARSE-DIE.
+;; If a word *isn't* in lexicon, or something else crops up, then
+;; #'x.if.parsing:parse will return an error symbol instead of a queued-action
+;; object— which means that #'interpret will recieve that error symbol from the
+;; engine. In this case, #'interpret will return the symbol as if it were its
+;; own error-symbol, but with an error-symbol of 'PARSE-DIE.
+;; If the error is in the interpretation method, it'll obviously return the
+;; second error-symbol as 'INTERPRET-DIE.
 
 ;; Anyway, ultimately the engine will actually execute the actionable list
 ;; generated by #'interpret.
 
 ;; —————————————————————————————————————
 
-;; TREE_OF_STATEMENT → LIST || (STRING SYMBOL)
+;; TODO: Obviously, if there are multiple matches it should error TF out
+;; and die, and... and... AHHHH good luck ;w;
+
+;; TREE_OF_STATEMENT → LIST || (SYMBOL SYMBOL)
 (defmethod interpret ((statement-tree list))
   "Actually interpret a parsed statement-tree; returns a list with the
   applicable function-name for the action, and the objects for the direct and
@@ -309,8 +370,8 @@ an :class <det>
   (let* ((subject  (or (the-subject statement-tree) (xif.e:get-player)))
          (action   (the-action statement-tree))
          (verb     (verb action))
-         (indirect (xif.e:name→object (indirect-object action)))
-         (direct   (xif.e:name→object (direct-object action))))
+         (indirect (xif.e:noun→game-objects (indirect-object action)))
+         (direct   (xif.e:noun→game-objects (direct-object action))))
     (cond ((not (xif.l:action-p verb))
            "That… that's just not a thing people do.")
           ((and (not indirect) (xif.l:action-indirect-required-p verb))
@@ -326,74 +387,78 @@ an :class <det>
 
 ;; —————————————————————————————————————
 ;; X-IF.ENVIRONMENT
+;; OBJECTS, GAME-STATE, ETC.
 
 (in-package :x-if.environment)
 
 ;; —————————————————————————————————————
 
+;; This package contains all aspect of the actual game 'environment'—
+;; all objects (rooms, entities, etc), means of accessing and modifying them,
+;; etc.
 
+;; There is a main overarching class (game-object), of which everything else is
+;; derived. From there, there are two divering subclasses— the 'location'
 
-(define-persistent-class god ()
+;; —————————————————————————————————————
+;; CLASSES
+
+;; The overarching class
+(define-persistent-class game-object ()
   ((id :read
       :initarg :id :reader id
       :index-type bknr.datastore::unique-index
       :index-initargs (:test #'equal)
-      :index-reader id→object
-      :index-values all-objects)
-   (nouns :read
-      :initarg :nouns :reader nouns
-      :index-type bknr.datastore::hash-index
-      :index-initargs (:test #'position)
-      :index-reader noun→object)
-   (proper-noun :read
-      :initarg :proper-name :reader proper-name
-      :index-type bknr.datastore::hash-index
-      :index-initargs (:test #'equal)
-      :index-reader proper-name→object
+      :index-reader id→game-object
+      :index-values all-game-objects)
+   (nouns :update
+      :initarg :nouns :reader nouns)
+   (proper-nouns :update
+      :initarg :proper-name :reader proper-nouns
       :initform nil)
-   (adjectives :read
+   (adjectives :update
       :initarg :adjectives :reader adjectives
       :initform nil)
-   (synonyms :read
-      :initarg :synonyms :reader synonyms
-      :initform nil)
-   (description :read
+   (description :update
       :initarg :desc :reader description
+      :initform nil)
+   (parent :update
+      :initarg :parent :reader parent
+      :initform nil)
+   (children :update
+      :initarg :children :reader children
+      :initform nil)
+   (max-children :update
+      :initarg :max-children :reader max-children
       :initform nil)))
 
-(define-persistent-class entity (god)
-  ((location :read
-      :initarg :location :reader location
-      :index-type bknr.datastore::hash-index
-      :index-initargs (:test #'equal)
-      :index-reader location→entity
-      :index-values all-entities)
-   (inventory :read
-      :initarg  :inventory :reader inventory
-      :initform nil)
-   (max-inventory :read
-      :initarg :max-inventory :reader max-inventory
-      :initform 0)
-   (weight :read
-      :initarg :weight :reader weight
-      :initform 0)
-   (hp :read
+;; For any object that can interacted with
+(define-persistent-class entity (game-object)
+  ((hp :update
       :initarg :hp :reader hp
       :initform nil)
-   (max-hp :read
+   (max-hp :update
        :initarg :max-hp :reader max-hp
-       :initform nil)))
+       :initform nil)
+   (weight :update
+       :initarg :weight :reader weight
+       :initform 0)))
 
-(define-persistent-class npc (entity) ((normie :read :initform T :index-values all-npcs)))
+;; These classes only exist for indexing and semantic purposes;
+;; they are identical to their super-classes
 
-(define-persistent-class player (npc)
-  ((mlg :read
-        :initform T :index-values get-player)))
+;; For NPCs, animals, etc.
+(define-persistent-class mob (entity) ())
 
-(define-persistent-class location (entity)
-  ((extreme-makeover-home-edition :read
-                                  :initform T :index-values all-locations)))
+;; For the PLAYER.
+(define-persistent-class player (mob) ())
 
+;; For LOCATIONS (rooms and such).
+(define-persistent-class location (game-object) ())
+
+
+;; For hypothetical ACTIONS;
+;; that is, commands the player can enter which will execute a given function.
 (define-persistent-class action ()
   ((function-name :read
       :initarg :function :reader function-name)
@@ -408,6 +473,9 @@ an :class <det>
    (indirect-object-p :read
        :initarg :indirect-object-p :initform nil :reader indirect-object-required-p)))
 
+
+;; For tuŝeblaj ACTIONS; generated by :x-if.interpret from interpreting a user
+;; statement. This is what will actually be executed by :x-if.interpret.
 (defclass queued-action ()
   ((function-name
        :initarg :function :accessor function-name)
@@ -418,22 +486,171 @@ an :class <det>
    (subject
        :initarg :subject :initform (get-player) :accessor subject)))
 
-(defun get-player ()
-  (id→object 100))
+
+;; —————————————————
+;; OBJECT ADD/DEL
+
+;; These are here to appropriately modify the LEXICON (xif.l:*lexicon*)
+;; according to objects in the game. Words used to describe objects
+;; and actions will be added when an object is initialized; deleted
+;; when destroyed.
+
+;; TODO
+;; Nuance is necessary; if a noun/adjective/etc is used for other objects,
+;; it shouldn't be added again nor deleted from the lexicon when adding a new
+;; object or deleting one, respectively.
+;; For now, it's assumed all words are new, and are all used by one object.
+
+(defmethod initialize-instance :after ((game-object game-object) &key)
+  (xif.l:add-game-object-words game-object))
+
+(defmethod destroy-object :after ((game-object game-object) &key)
+  (xif.l:delete-game-object-words game-object))
 
 
-(defmethod initialize-instance :after ((god god) &key)
-  (xif.l:add-noun god)
-  (xif.l:add-adjective god)
-  (xif.l:reload-lexicon))
 
 (defmethod initialize-instance :after ((action action) &key)
-  (xif.l:add-action action)
-  (xif.l:reload-lexicon))
+  (mapcar #'xif.l:add-verb (verbs action)))
+
+;; TODO: write #'xif.l:remove-action
+(defmethod destroy-object :after ((action action) &key))
+
+
+;; —————————————————
+;; PARENT/CHILD
+
+;; GAME-OBJECT GAME-OBJECT → NIL
+(deftransaction link (child parent)
+  "Link two objects together, as child and parent."
+  (setf (slot-value parent 'children)
+        (nconc (slot-value parent 'children) (list child)))
+  ;; --
+  (if (child-p child) (unlink child))
+  (setf (slot-value child 'parent) parent))
+
+;; GAME-OBJECT → NIL
+(deftransaction unlink (child)
+  "Seperate a child from it's parent (and vice-versa)."
+  (let ((parent (slot-value child 'parent)))
+    (setf (slot-value parent 'children)
+          (delete child (slot-value parent 'children)))
+    ;; --
+    (setf (slot-value child 'parent) nil)))
+
+
+;; GAME-OBJECT → BOOLEAN
+(defmethod parent-p ((object game-object))
+  "Return whether or not an object is a parent (has 1+ children)."
+  (slot-value object 'children))
+
+;; GAME-OBJECT → BOOLEAN
+(defmethod child-p ((object game-object))
+  "Return whether or not an object is a child (has a parent)."
+  (slot-value object 'parent))
+
+
+;; —————————————————
+;; INDEXING
+
+;; NIL → PLAYER
+(defun get-player ()
+  "Return the player object."
+  (car (store-objects-with-class 'player)))
+
+;; NIL → LIST_OF_LOCATIONS
+(defun all-locations ()
+  "Get all location objects."
+  (store-objects-with-class 'location))
+
+;; NIL → LIST_OF_MOBS
+(defun all-mobs ()
+  "Get all mob objects."
+  (store-objects-with-class 'mob))
+
+;; NIL → LIST_OF_ENTITIES
+(defun all-entities ()
+  "Get all entity objects."
+  (store-objects-with-class 'entity))
+
+;; NIL → LIST_OF_ENTITIES
+(defun all-actions ()
+  "Get all entity objects."
+  (store-objects-with-class 'action))
+
+
+;; LIST_OF_OBJECTS STRING → LIST_OF_OBJECTS
+(defun noun→objects (objects noun)
+  "Return objects within the current list of objects of the given noun."
+  (index-by-slot-list objects 'nouns noun))
+
+;; LIST_OF_OBJECTS STRING → LIST_OF_OBJECTS
+(defun adjective→objects (objects adjective)
+  "Return objects within the current list of objects of the given adjective."
+  (index-by-slot-list objects 'adjectives adjective))
+
+;; LIST_OF_OBJECTS STRING → LIST_OF_OBJECTS
+(defun proper-noun→objects (objects proper-noun)
+  "Return objects within the current list of objects of the given proper-noun"
+  (index-by-slot-list objects 'proper-nouns proper-noun))
+
+;; STRING → LIST_OF_ACTIONS
+(defun verb→actions (verb)
+  "Return all actions matching the given verb."
+  (index-by-slot-list (all-actions) 'verbs verb))
+
+
+;; SYMBOL SYMBOL FUNCTION SYMBOL FUNCTION → (DEFUN …)
+(defmacro defun-obj-word-index (name obj-type all-obj-type word-type word-fun)
+  "Makes an index function for the given object type and word-type.
+  I.E., will generate #'adjective→mobs for object-type 'mobs' and word-type of
+  'adjective'"
+  `(defun ,name (,word-type)
+     ,(format nil "Return the ~A corresponding with the given ~A."
+              obj-type word-type)
+     (funcall ,word-fun (funcall ,all-obj-type) ,word-type)))
+
+;; SYMBOL FUNCTION SYMBOL SYMBOL SYMBOL → ( (DEFUN …) (DEFUN …) (DEFUN …))
+(defmacro defuns-obj-word-indices (obj-type all-obj adj→obj noun→obj pnoun→obj)
+  "Makes the index functions for a given object type for every word type.
+  I.E., when given 'mobs', it'll make #'noun→mobs, #'adjective→mobs, etc."
+  `(progn
+    (defun-obj-word-index ,adj→obj ,obj-type ,all-obj adjective
+      #'adjective→objects)
+    (defun-obj-word-index ,noun→obj ,obj-type ,all-obj noun #'noun→objects)
+    (defun-obj-word-index ,pnoun→obj ,obj-type ,all-obj proper-noun
+      #'proper-noun→objects)))
+
+
+(defuns-obj-word-indices game-object #'all-game-objects
+  adjective→game-objects noun→game-objects proper-noun→game-objects)
+(defuns-obj-word-indices entity #'all-entities
+  adjective→entities noun→entities proper-noun→entities)
+(defuns-obj-word-indices mob #'all-mobs
+  adjective→mobs noun→mobs proper-noun→mobs)
+(defuns-obj-word-indices locations #'all-locations
+  adjective→locations noun→locations proper-noun→locations)
+
+
+;; LIST_OF_OBJECTS SYMBOL VARYING → LIST_OF_OBJECTS
+(defun index-by-slot-list (objects slot-name target)
+  "Return objects from the given list that contain a target item in the list
+  of the given slot."
+  (index-by-slot objects slot-name target :test #'xif.m:position-equal))
+
+;; LIST_OF_OBJECTS SYMBOL VARYING :FUNCTION → LIST_OF_OBJECTS
+(defun index-by-slot (objects slot-name target &key (test #'equal))
+  "Return objects from the given list that pass the given test between
+  slot-value and target."
+  (loop :for object :in objects
+        :if (funcall test target (slot-value object slot-name))
+        :collect object))
+
+
 
 
 ;; —————————————————————————————————————
 ;; X-IF.CLIENT
+;; ACTUALLY PLAY THE GAME
 
 (in-package :x-if.client)
 
@@ -444,7 +661,7 @@ an :class <det>
 ;; —————————————————————————————————————
 
 (defun status ()
-  (format nil "~A~%" (slot-value (get-player) 'xif.e::location)))
+  (format nil "~A~%" (slot-value (get-player) 'xif.e::parent)))
 
 (defun prompt () ">> ")
 
@@ -453,7 +670,7 @@ an :class <det>
     (display-status)
     (setq m (input-sentence))
     (text "You said: ~A~%" m)
-    (text "~A~%" (xif.e:all-objects))
+    (text "~A~%" (xif.e:all-game-objects))
     (text "I LOVE YOU~%")
     (sleep 2)
     (game-loop)))
@@ -461,7 +678,7 @@ an :class <det>
 (defun start (game)
   (make-instance 'mp-store :directory #p"~/.local/share/x-if/"
                  :subsystems (list (make-instance 'store-object-subsystem)))
-  (if (not (all-objects))
+  (if (not (all-game-objects))
     (populate-world))
   (game-loop))
 
@@ -469,22 +686,34 @@ an :class <det>
   (text (xif.e:description object)))
 
 (defun populate-world ()
-  (make-instance 'xif.e::location :name "Lobby" :id 0
+  (make-instance 'xif.e::location :id 0  :proper-nouns '("Lobby")
+                 :nouns '("room")
+                 :adjectives '("ugly")
                  :description "It's rather ugly, really.")
-  (make-instance 'xif.e::npc :name "Barry"      :id 101
-                 :description "He looks suspicious, no?"
-                 :location (id→object 0))
-  (make-instance 'xif.e::player :name "Maria"   :id 100
-                 :description "A rather hideous lass."
-                 :location (id→object 0))
+
+  (make-instance 'xif.e::mob :id 101  :proper-nouns '("Barry")
+                 :nouns '("human" "person" "man" "gentleman" "sir" "dude")
+                 :adjectives '("suspicious")
+                 :description "He looks suspicious, no?")
+
+  (make-instance 'xif.e::player :id 100
+                 :proper-nouns '("Maria" "I" "myself" "me")
+                 :nouns '("human" "person" "woman" "lady" "lass" "dudette")
+                 :adjectives '("hideous")
+                 :description "A rather hideous lass.")
+
   (make-instance 'xif.e::action :function-name 'xif.c::examine :direct-object-p T
-                 :verbs '("examine" "look" "view")))
+                 :verbs '("examine" "look" "view"))
+  
+  (link (get-player) (id→game-object 0))
+  (link (id→game-object 100) (id→game-object 0)))
 
 
 
 
 ;; —————————————————————————————————————
 ;; X-IF.CLIENT.TERMINAL
+;; A SIMPLE CLIENT
 
 (in-package :x-if.client.terminal)
 
@@ -501,20 +730,90 @@ an :class <det>
 (defun xif.c::input-sentence ()
   (read-line))
 
+
+
+
+;; —————————————————————————————————————
+;; X-IF.MISC
+;; MISC HELPER FUNCTIONS
+
 (in-package :x-if.misc)
 
+;; —————————————————————————————————————
+
+;; This package just contains random, useful functions that're used throughout
+;; x-if. Mainly they're for string manipulations, etc.
+
+;; STRING → LIST_OF_STRINGS
 (defun string-lines (string)
+  "Turn a multi-line string into a list of lines."
   (cl-strings:split string #\newline))
 
-(defun line-cdr (string)
-  (lines-string (cdr (string-lines string))))
-
-(defun line-car (string)
-  (lines-string (car (string-lines string))))
-
-(defun line-length (string)
-  (length (string-lines string)))
-
+;; LIST_OF_STRINGS → STRING
 (defun lines-string (lines)
+  "Turn a list of strings into a multi-lined string, with each string being
+  a seperate line."
   (cl-strings:join lines :separator "
 "))
+
+
+;; STRING → STRING
+(defmethod line-cdr ((string string))
+  "Get the 'cdr' of a multi-lined string (pop off the first line)."
+  (line-cdr (string-lines string)))
+
+;; LIST_OF_STRINGS → STRING
+(defmethod line-cdr ((lines list))
+  "Get the 'cdr' of a list of lines, then turn back into a string."
+  (lines-string (cdr lines)))
+
+;; STRING → STRING
+(defmethod line-car ((string string))
+  "Get a multi-lined string's 'car' (the first line)."
+  (line-car (string-lines string)))
+
+;; LIST_OF_STRINGS → STRING
+(defmethod line-car ((lines list))
+  "Get the 'car' of a list of lines."
+  (car lines))
+
+
+;; STRING → NUMBER
+(defun line-length (string)
+  "Return the amount of lines in a given string."
+  (length (string-lines string)))
+
+;; STRING STRING FUNCTION → NUMBER
+(defmethod line-position ((string string) target &key (test #'in-string-p))
+  "Return the number of the line in which a given target-string can be found,
+  within a multi-lined string."
+  (line-position (string-lines string) target :test test))
+
+;; LIST_OF_STRINGS STRING FUNCTION → NUMBER
+(defmethod line-position ((lines list) target &key (test #'in-string-p))
+  "Return which number string the given target-string can be found in."
+  (position T (mapcar (lambda (line) (funcall test line target)) lines)))
+
+;; STRING STRING → BOOLEAN
+(defun in-string-p (string target)
+  "Return whether or not a target-string is within another string."
+  (< 1 (length (cl-strings:split string target))))
+
+;; STRING STRING FUNCTION → STRING
+(defmethod remove-line ((string string) target &key (test #'in-string-p))
+  "Remove a line matching the given test, given a target string."
+  (remove-line (string-lines string) target :test test))
+
+;; LIST_OF_STRINGS STRING FUNCTION → STRING
+(defmethod remove-line ((lines list) target &key (test #'in-string-p))
+  "Remove a line matching the test, return a multi-lined string based on
+  given list, but sans that removed line, ofc."
+  (aif (ignore-errors (line-position lines target :test test))
+       (lines-string
+        (remove (nth it lines) lines :test #'equal :count 1))
+       (lines-string list)))
+
+;; ITEM LIST → NUMBER
+(defun position-equal (item list)
+  "Literally just #'cl:position but with the test equal."
+  (position item list :test #'equal))
