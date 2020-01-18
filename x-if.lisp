@@ -19,11 +19,10 @@
 (defpackage :x-if.misc
   (:use :cl :anaphora)
   (:nicknames :xif.m)
-  (:export :line-cdr :line-car
-           :line-length :line-position
-           :in-string-p
-           :remove-line
-           :position-equal))
+  (:export :line-cdr :line-car :line-length :line-position
+           :in-string-p :remove-line
+           :position-equal
+           :triangulate))
 
 (defpackage :x-if.lexicon
   (:use :cl :earley-parser)
@@ -46,8 +45,10 @@
            :all-mobs
            :noun→mobs :proper-noun→mobs :adjective→mobs
            :noun→locations :proper-noun→locations :adjective→locations
+           :verb→actions
            :all-locations
            :id :description
+           :indirect-object-required-p :direct-object-required-p
            :nouns :proper-nouns :adjectives
            :max-children :weight :hp :max-hp
            :children :parent
@@ -59,12 +60,14 @@
   (:export :parse
            :noun-phrases :det :prep :proper-noun :noun-name :det :prep
            :nominal-phrase :noun
-           :verb-phrase :verb :direct-object :indirect
+           :adjective-phrase :adjective
+           :verb-phrase :verb :direct-object :indirect-object
            :the-action :the-subject))
 
 (defpackage :x-if.interpret
   (:use :cl)
-  (:nicknames :xif.i))
+  (:nicknames :xif.i)
+  (:export :noun-phrase→game-objects))
 
 (defpackage :x-if.client
   (:use :cl :xif.e :bknr.datastore)
@@ -145,6 +148,11 @@
   "Return a tree's verb-phrase."
   (assoc "VP" (cdr tree) :test #'equal))
 
+;; TREE → TREE_OF_ADJECTIVE_PHRASE
+(defun adjective-phrase (tree)
+  "Return the adjective-phrase of a given tree."
+  (assoc "AP" (cdr tree) :test #'equal))
+
 ;; TREE_OF_VERB_PHRASE → TREE_OF_NOUN_PHRASE
 (defun direct-object (verb-phrase)
   "Return a verb-phrase's direct object."
@@ -195,6 +203,11 @@
   (if (nominal noun-phrase)
     (noun (nominal noun-phrase))
     (proper-noun noun-phrase)))
+
+;; TREE_OF_NOUN_PHRASE → STRING
+(defun adjective (noun-phrase)
+  "Return the name of a noun's nominal phrase."
+  (cadr (assoc "noun" (cdr nominal-phrase) :test #'equal)))
 
 ;; —————————————————————————————————————
 
@@ -362,16 +375,16 @@ an :class <det>
 ;; TODO: Obviously, if there are multiple matches it should error TF out
 ;; and die, and... and... AHHHH good luck ;w;
 
-;; TREE_OF_STATEMENT → LIST || (SYMBOL SYMBOL)
+;; TREE_OF_STATEMENT → LIST || SYMBOL
 (defmethod interpret ((statement-tree list))
   "Actually interpret a parsed statement-tree; returns a list with the
   applicable function-name for the action, and the objects for the direct and
   indirect objects, as well as the subject."
-  (let* ((subject  (or (the-subject statement-tree) (xif.e:get-player)))
+  (let* ((subject  (aif (the-subject statement-tree) (name→mobs it) "I")
          (action   (the-action statement-tree))
          (verb     (verb action))
-         (indirect (xif.e:noun→game-objects (indirect-object action)))
-         (direct   (xif.e:noun→game-objects (direct-object action))))
+         (indirect (indirect-object action))
+         (direct   (direct-object action))))
     (cond ((not (xif.l:action-p verb))
            "That… that's just not a thing people do.")
           ((and (not indirect) (xif.l:action-indirect-required-p verb))
@@ -382,8 +395,90 @@ an :class <det>
            (list (xif.l:action-function verb)
                  :subject subject :indirect indirect :direct direct)))))
 
-           
-           
+;; SYMBOL → SYMBOL SYMBOL
+(defmethod interpret ((error symbol))
+  "If passed on an error-symbol by #'xif.p:parse, then return that symbol.
+  Note: If you need to determine if a returned error is from parsing (xif.p) or
+  interpreting (xif.i), check the symbol's package (#'symbol-package)."
+  (values error 'PARSE-DIE))
+
+;; LIST → GAME-OBJECT
+(defun statement→subject-object (statement-tree)
+  "Return the the subject's object of a given statement."
+  (aif (xif.p:the-subject statement-tree)
+       (car (noun-phrase→game-objects it))
+       (xif.e:get-player)))
+
+;; LIST → QUEUED-ACTION
+(defun statement→queued-action (statement-tree)
+  "Interpret a earley-tree parsed statement into a queued-action for
+  later execution."
+  (verb-phrase→queued-action
+   (xif.p:the-action statement-tree)
+   :subject (statement→subject-object statement-tree)))
+
+;; LIST :OBJECT → QUEUED-ACTION
+(defun verb-phrase→queued-action (verb-phrase &key (subject-object nil))
+  "Interpret a earley-parsed verb-phrase into an queued-action object."
+  (awhen (verb-phrase→action verb-phrase)
+    (make-instance 'xif.e::queued-action
+      :function-name (slot-value 'function-name it)
+      :indirect-object
+                   (noun-phrase→game-objects (xif.p:indirect-object verb-phrase)
+                                               :subject subject-object)
+      :direct-object
+                   (noun-phrase→game-objects (xif.p:direct-object verb-phrase)
+                                               :subject subject-object))))
+
+;; LIST → ACTION
+(defun verb-phrase→action (verb-phrase)
+  "Return the action congruent with the given verb-phrase— that is, the
+  indirect/direct options are compatible, and the verb matches."
+  (let ((verb     (verb verb-phrase))
+        (indirect (noun-phrase→game-objects (xif.p:indirect-object verb-phrase)))
+        (direct   (noun-phrase→game-objects (xif.p:direct-object verb-phrase)))
+        (actions  (xif.e:verb→actions verb)))
+    (loop :for action :in actions
+          :if (congruent-vp-action-p action verb indirect direct)
+          :return action)))
+
+;; ACTION STRING VARYING VARYING → BOOLEAN
+(defun congruent-vp-action-p (action verb indirect direct)
+  "Return whether or not the given indirect and direct object values are
+  congruent with a given 'action' object. That is, if there is a NIL indirect
+  object (or direct) where there ought not to be, the action and given
+  verb-phrase are incompatible. (This allows multiple actions with the same
+  to exist, so long as the indirect and direct arguments are compatible)."
+  (flet ((congruent-indirect-p (action indirect)
+           (or (and (not indirect) (not (xif.e:indirect-object-required-p action)))
+               (and indirect       (xif.e:indirect-object-required-p action))))
+         (congruent-direct-p (action direct)
+           (or (and (not direct) (not (xif.e:direct-object-required-p action)))
+               (and direct       (xif.e:direct-object-required-p action)))))
+    (and (congurent-indirect-p action indirect)
+         (congruent-direct-p action direct))))
+
+
+;; LIST :GAME-OBJECT → LIST_OF_GAME-OBJECT(S)
+(defun noun-phrase→game-objects (noun-phrase &key (subject nil))
+  "Returns game-object(s) that correspond to the given noun-phrase, using
+  the proper-noun/noun and adjective in the phrase. If passed the statement's
+  subject (likely player character), it will also narrow down the results by
+  matching results' parents to the subject's parent. (Presumably the parent
+  would ultimately be the same room as the player.)"
+  (let ((adjective (xif.p:adjective noun-phrase))
+        (noun (xif.p:noun noun-phrase))
+        (proper-noun (xif.p:proper-noun noun-phrase)))
+    (alet
+      (xif.m:triangulate (xif.e:adjective→game-objects adjective)
+                   (xif.e:noun→game-objects noun)
+                   (xif.e:proper-noun→game-objects proper-noun))
+      (if (and subject (< 1 (length it)))
+        (xif.m:triangulate it (parent→game-objects (xif.e:parent subject)))
+        it))))
+                     
+
+
 
 ;; —————————————————————————————————————
 ;; X-IF.ENVIRONMENT
@@ -469,9 +564,11 @@ an :class <det>
        ; :index-type bknr.datastore::hash-index
        ; :index-reader verb→action
    (direct-object-p :read
-       :initarg :direct-object-p :initform nil :reader direct-object-required-p)
+       :initarg :direct-object-p :initform nil
+                    :reader direct-object-required-p)
    (indirect-object-p :read
-       :initarg :indirect-object-p :initform nil :reader indirect-object-required-p)))
+       :initarg :indirect-object-p :initform nil
+                      :reader indirect-object-required-p)))
 
 
 ;; For tuŝeblaj ACTIONS; generated by :x-if.interpret from interpreting a user
@@ -494,12 +591,6 @@ an :class <det>
 ;; according to objects in the game. Words used to describe objects
 ;; and actions will be added when an object is initialized; deleted
 ;; when destroyed.
-
-;; TODO
-;; Nuance is necessary; if a noun/adjective/etc is used for other objects,
-;; it shouldn't be added again nor deleted from the lexicon when adding a new
-;; object or deleting one, respectively.
-;; For now, it's assumed all words are new, and are all used by one object.
 
 (defmethod initialize-instance :after ((game-object game-object) &key)
   (xif.l:add-game-object-words game-object))
@@ -705,8 +796,8 @@ an :class <det>
   (make-instance 'xif.e::action :function-name 'xif.c::examine :direct-object-p T
                  :verbs '("examine" "look" "view"))
   
-  (link (get-player) (id→game-object 0))
-  (link (id→game-object 100) (id→game-object 0)))
+  (xif.e:link (xif.e:get-player) (xif.e:id→game-object 0))
+  (xif.e:link (xif.e:id→game-object 101) (xif.e:id→game-object 0)))
 
 
 
@@ -813,7 +904,21 @@ an :class <det>
         (remove (nth it lines) lines :test #'equal :count 1))
        (lines-string list)))
 
-;; ITEM LIST → NUMBER
+;; VARYING LIST → NUMBER
 (defun position-equal (item list)
   "Literally just #'cl:position but with the test equal."
   (position item list :test #'equal))
+
+
+;; VARYING LIST :FUNCTION → BOOLEAN
+(defun lacking (item list &key (test #'equal))
+  "Return whether or not the given item is not in a list."
+  (not (position item list :test test)))
+
+;; LIST … LIST → LIST
+(defun triangulate (&rest victims)
+  "Return a list of values that are within each passed list."
+  (loop :for car-item :in (car victims)
+        :if (lacking nil
+              (mapcar (lambda (victim) (position car-item victim)) victims))
+        :collect car-item))
