@@ -33,5 +33,5 @@ BORING STUFF
 ————————————————————————————————————————
 License is the GNU GPLv3:
        check COPYING.txt (/ipfs/QmTBpqbvJLZaq3hTMUhxX5hyJaSCeWe6Q5FRctQbsD6EsE)
-Author is Jaidyn Ann <jadedctrl@teknik.io>
-Sauce is at https://git.eunichx.us/x-if.git
+Author is Jaidyn Ann <jadedctrl@posteo.at>
+Sauce is at https://hak.xwx.moe/jadedctrl/x-if
